@@ -1,7 +1,17 @@
 import fs from 'fs';
 import path from 'path';
+import http from 'http';
 
-// Telegram Bot Token (Environment Variable ya command line argument se leta hai)
+// Render Web Service ke liye port bind karna zaroori hai
+const PORT = process.env.PORT || 10000;
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end('🤖 Debuggers Club Telegram Bot is LIVE 24/7 on Render!\n');
+}).listen(PORT, '0.0.0.0', () => {
+  console.log(`🌐 Web server running on port ${PORT}`);
+});
+
+// Telegram Bot Token
 const BOT_TOKEN = process.argv[2] || process.env.TELEGRAM_BOT_TOKEN;
 
 if (!BOT_TOKEN) {
@@ -13,7 +23,6 @@ if (!BOT_TOKEN) {
 const DATA_FILE = path.resolve(process.cwd(), 'debugger_club_data.json');
 let adminPasscode = 'DEBUGGER2026';
 
-// Starter events data
 const defaultData = {
   events: [
     {
@@ -80,7 +89,6 @@ function saveData() {
 
 const userSessions = new Map();
 
-// Telegram API Helper (Uses built-in global fetch in Node.js 18+)
 async function tg(method, body = {}) {
   const url = `https://api.telegram.org/bot${BOT_TOKEN}/${method}`;
   const res = await fetch(url, {
@@ -88,286 +96,396 @@ async function tg(method, body = {}) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  return res.json();
+  return await res.json();
+}
+
+function isOrganizer(userId) {
+  const str = String(userId);
+  return db.organizers.some((o) => String(o.telegramUserId) === str);
 }
 
 async function setupCommands() {
-  await tg('setMyCommands', {
-    commands: [
-      { command: 'events', description: 'Browse club events & 1-click register' },
-      { command: 'newevent', description: '[Organizers] Create a new club event' },
-      { command: 'participants', description: '[Organizers] View registered attendees' },
-      { command: 'deleteevent', description: '[Organizers] Delete an event' },
-      { command: 'makeadmin', description: 'Enter organizer passcode to get admin role' },
-      { command: 'cancel', description: 'Cancel current ongoing action' },
-      { command: 'help', description: 'Show all available bot commands & guides' },
-    ],
-  });
-}
+  const commands = [
+    { command: 'events', description: 'Browse upcoming events and register' },
+    { command: 'newevent', description: '(Organizers) Create an event' },
+    { command: 'participants', description: '(Organizers) View registrations' },
+    { command: 'deleteevent', description: '(Organizers) Delete an event' },
+    { command: 'makeadmin', description: 'Become the first organizer' },
+    { command: 'cancel', description: 'Cancel current action' },
+    { command: 'help', description: 'Show help' },
+  ];
 
-function isOrganizer(userId, username) {
-  return db.organizers.some(
-    (o) =>
-      String(o.telegramUserId) === String(userId) ||
-      (username && o.username && o.username.toLowerCase() === username.toLowerCase())
-  );
+  try {
+    const res = await tg('setMyCommands', { commands });
+    if (res.ok) {
+      console.log('✅ Registered all commands in Telegram menu!');
+    }
+  } catch (e) {
+    // ignore
+  }
 }
 
 async function handleMessage(msg) {
-  if (!msg || !msg.text) return;
+  if (!msg || !msg.text || !msg.from) return;
+
   const chatId = msg.chat.id;
-  const userId = msg.from.id;
+  const userId = String(msg.from.id);
+  const fullName = [msg.from.first_name, msg.from.last_name].filter(Boolean).join(' ') || 'Developer';
   const username = msg.from.username || '';
-  const fullName = `${msg.from.first_name || ''} ${msg.from.last_name || ''}`.trim() || 'Debugger';
   const text = msg.text.trim();
 
-  // Active Session Wizard Check
-  const session = userSessions.get(userId);
-  if (session && !text.startsWith('/')) {
-    return handleSessionStep(chatId, userId, text, session);
+  console.log(`[MSG] @${username || userId} (${fullName}): ${text}`);
+
+  if (text === '/cancel' || text.toLowerCase() === 'cancel') {
+    userSessions.delete(userId);
+    return tg('sendMessage', {
+      chat_id: chatId,
+      text: '❌ *Action Cancelled*\n\nType `/events` to explore club events or `/help` for commands.',
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '📅 Upcoming Events', callback_data: 'cmd_events' }],
+          [{ text: 'ℹ️ Show Help', callback_data: 'cmd_help' }],
+        ],
+      },
+    });
   }
 
-  const [cmd] = text.split(' ');
+  const session = userSessions.get(userId);
+  if (session && session.step) {
+    return handleSessionStep(chatId, userId, fullName, username, text, session);
+  }
 
-  switch (cmd.toLowerCase()) {
+  const cmd = text.split(' ')[0].toLowerCase().split('@')[0];
+
+  switch (cmd) {
     case '/start':
       return tg('sendMessage', {
         chat_id: chatId,
-        text: `👋 *Welcome to Debuggers' Club Bot, ${fullName}!*\n\n` +
-          `Your all-in-one portal for coding contests, hackathons, and workshops.\n\n` +
-          `📌 *Quick Commands:*\n` +
-          `• /events — Browse upcoming events & register\n` +
-          `• /help — Full command guide & organizer instructions\n` +
-          `• /makeadmin — Register as an event organizer\n\n` +
-          `Tap below to explore active club events! 👇`,
+        text:
+          `🚀 *Welcome to Debuggers' Club!* 💻\n\n` +
+          `Hey *${fullName}*! Welcome to the official bot of *Debuggers' Club*.\n\n` +
+          `📌 *Available Commands:*\n` +
+          `• \`/events\` — Browse upcoming events & register\n` +
+          `• \`/help\` — View guide\n` +
+          `• \`/makeadmin\` — Claim organizer role\n\n` +
+          `Use the buttons below to begin:`,
         parse_mode: 'Markdown',
         reply_markup: {
           inline_keyboard: [
             [{ text: '📅 Browse Upcoming Events', callback_data: 'cmd_events' }],
-            [{ text: '❓ Help & Guides', callback_data: 'cmd_help' }],
+            [
+              { text: 'ℹ️ Help Menu', callback_data: 'cmd_help' },
+              { text: isOrganizer(userId) ? '👑 Organizer Area' : '🛡 Claim Admin', callback_data: isOrganizer(userId) ? 'cmd_participants' : 'cmd_makeadmin' },
+            ],
           ],
         },
       });
 
     case '/events':
-      return sendEventsList(chatId);
+      return sendEventsList(chatId, userId);
+
+    case '/newevent':
+      if (!isOrganizer(userId)) {
+        return tg('sendMessage', {
+          chat_id: chatId,
+          text: `⛔ *Access Denied: Organizers Only*\n\nOnly verified Debuggers' Club organizers can create events.\nUse \`/makeadmin\` to authenticate.`,
+          parse_mode: 'Markdown',
+        });
+      }
+      userSessions.set(userId, { step: 'title', data: {} });
+      return tg('sendMessage', {
+        chat_id: chatId,
+        text: `✨ *Create New Event (Step 1/4)*\n\nPlease enter the *Title* of your event (or \`/cancel\`):`,
+        parse_mode: 'Markdown',
+      });
+
+    case '/participants':
+      if (!isOrganizer(userId)) {
+        return tg('sendMessage', {
+          chat_id: chatId,
+          text: `⛔ *Access Denied: Organizers Only*\n\nOnly organizers can view attendee rosters.`,
+          parse_mode: 'Markdown',
+        });
+      }
+      const buttons = db.events.map((e) => [
+        { text: `👥 ${e.title.substring(0, 28)} (${e.registeredCount})`, callback_data: `part_${e.id}` },
+      ]);
+      return tg('sendMessage', {
+        chat_id: chatId,
+        text: `📋 *Select Event to View Registrations:*`,
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: buttons },
+      });
+
+    case '/deleteevent':
+      if (!isOrganizer(userId)) {
+        return tg('sendMessage', {
+          chat_id: chatId,
+          text: `⛔ *Access Denied: Organizers Only*`,
+          parse_mode: 'Markdown',
+        });
+      }
+      const delButtons = db.events.map((e) => [
+        { text: `🗑 Delete: ${e.title.substring(0, 26)}`, callback_data: `del_${e.id}` },
+      ]);
+      return tg('sendMessage', {
+        chat_id: chatId,
+        text: `⚠️ *Delete Event*\n\nSelect which event to delete:`,
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: delButtons },
+      });
+
+    case '/makeadmin':
+      if (isOrganizer(userId)) {
+        return tg('sendMessage', {
+          chat_id: chatId,
+          text: `👑 *You are already a Debuggers' Club organizer!*`,
+          parse_mode: 'Markdown',
+        });
+      }
+      const parts = text.split(' ');
+      if (parts.length > 1 && parts[1].trim() === adminPasscode) {
+        db.organizers.push({
+          telegramUserId: userId,
+          username,
+          fullName,
+          role: 'organizer',
+        });
+        saveData();
+        return tg('sendMessage', {
+          chat_id: chatId,
+          text: `✅ *Passcode Verified!* You are now an organizer for Debuggers' Club!`,
+          parse_mode: 'Markdown',
+        });
+      }
+      userSessions.set(userId, { step: 'passcode' });
+      return tg('sendMessage', {
+        chat_id: chatId,
+        text: `🔐 *Organizer Verification*\n\nPlease reply with the Admin Passcode (Default: \`${adminPasscode}\`):`,
+        parse_mode: 'Markdown',
+      });
 
     case '/help':
       return tg('sendMessage', {
         chat_id: chatId,
-        text: `⚡ *Debuggers' Club Bot Commands:*\n\n` +
-          `👤 *Attendee Commands:*\n` +
-          `• /events — View upcoming events and 1-click register\n` +
-          `• /help — Show this instructions manual\n` +
-          `• /cancel — Cancel any active wizard\n\n` +
-          `🛡 *Organizer Commands:*\n` +
-          `• /newevent — Step-by-step wizard to create an event\n` +
-          `• /participants — View attendee list for any event\n` +
-          `• /deleteevent — Remove an event\n` +
-          `• /makeadmin — Verify with passcode (*DEBUGGER2026*)`,
+        text:
+          `🛠 *Debuggers' Club Bot — Command Menu*\n\n` +
+          `• \`/events\` — Browse upcoming events and register\n` +
+          `• \`/newevent\` — (Organizers) Create an event\n` +
+          `• \`/participants\` — (Organizers) View registrations\n` +
+          `• \`/deleteevent\` — (Organizers) Delete an event\n` +
+          `• \`/makeadmin\` — Become the first organizer\n` +
+          `• \`/cancel\` — Cancel current action\n` +
+          `• \`/help\` — Show help`,
         parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '📅 Upcoming Events', callback_data: 'cmd_events' }],
+            [{ text: '👑 Organizer Mode', callback_data: 'cmd_makeadmin' }],
+          ],
+        },
       });
-
-    case '/makeadmin': {
-      userSessions.set(userId, { type: 'admin_auth', step: 1 });
-      return tg('sendMessage', {
-        chat_id: chatId,
-        text: `🔐 *Organizer Verification*\n\nPlease enter the secret club admin passcode to gain organizer access:\n\n_(Send /cancel to exit)_`,
-        parse_mode: 'Markdown',
-      });
-    }
-
-    case '/newevent': {
-      if (!isOrganizer(userId, username)) {
-        return tg('sendMessage', {
-          chat_id: chatId,
-          text: `🚫 *Access Restricted*\n\nYou must be a verified organizer. Run /makeadmin first.`,
-          parse_mode: 'Markdown',
-        });
-      }
-      userSessions.set(userId, { type: 'create_event', step: 'title', data: {} });
-      return tg('sendMessage', {
-        chat_id: chatId,
-        text: `📝 *Step 1/5:* Enter the *Title* of the event:`,
-        parse_mode: 'Markdown',
-      });
-    }
-
-    case '/participants': {
-      if (!isOrganizer(userId, username)) {
-        return tg('sendMessage', { chat_id: chatId, text: `🚫 Organizer access required. Run /makeadmin.` });
-      }
-      const buttons = db.events.map((e) => [{ text: `${e.title} (${e.registeredCount})`, callback_data: `part_${e.id}` }]);
-      return tg('sendMessage', {
-        chat_id: chatId,
-        text: `👥 *Select an event to view attendees:*`,
-        parse_mode: 'Markdown',
-        reply_markup: { inline_keyboard: buttons },
-      });
-    }
-
-    case '/deleteevent': {
-      if (!isOrganizer(userId, username)) {
-        return tg('sendMessage', { chat_id: chatId, text: `🚫 Organizer access required.` });
-      }
-      const buttons = db.events.map((e) => [{ text: `🗑 ${e.title}`, callback_data: `del_${e.id}` }]);
-      return tg('sendMessage', {
-        chat_id: chatId,
-        text: `⚠️ *Select event to delete:*`,
-        parse_mode: 'Markdown',
-        reply_markup: { inline_keyboard: buttons },
-      });
-    }
-
-    case '/cancel':
-      userSessions.delete(userId);
-      return tg('sendMessage', { chat_id: chatId, text: `✖️ Action cancelled.` });
 
     default:
-      return tg('sendMessage', { chat_id: chatId, text: `Command not recognized. Type /help to see all commands.` });
+      if (cmd.startsWith('/register_')) {
+        const evtId = cmd.replace('/register_', '');
+        return registerUser(chatId, userId, fullName, username, evtId);
+      }
+      return tg('sendMessage', {
+        chat_id: chatId,
+        text: `Type \`/events\` to explore club events or \`/help\` for commands.`,
+      });
   }
 }
 
-async function handleSessionStep(chatId, userId, text, session) {
-  if (session.type === 'admin_auth') {
+async function handleSessionStep(chatId, userId, fullName, username, text, session) {
+  if (session.step === 'passcode') {
     if (text.trim() === adminPasscode) {
-      if (!db.organizers.some((o) => String(o.telegramUserId) === String(userId))) {
-        db.organizers.push({
-          telegramUserId: String(userId),
-          fullName: 'Organizer',
-          role: 'organizer',
-        });
-        saveData();
-      }
       userSessions.delete(userId);
+      db.organizers.push({ telegramUserId: userId, username, fullName, role: 'organizer' });
+      saveData();
       return tg('sendMessage', {
         chat_id: chatId,
-        text: `🎉 *Success!* You are now a verified organizer. You can use /newevent, /participants, and /deleteevent.`,
+        text: `✅ *Passcode Verified!*\n\nYou are now an organizer! You can now use \`/newevent\`, \`/participants\`, and \`/deleteevent\`.`,
         parse_mode: 'Markdown',
       });
     } else {
-      userSessions.delete(userId);
-      return tg('sendMessage', { chat_id: chatId, text: `❌ Incorrect passcode.` });
-    }
-  }
-
-  if (session.type === 'create_event') {
-    if (session.step === 'title') {
-      session.data.title = text;
-      session.step = 'date';
-      return tg('sendMessage', { chat_id: chatId, text: `📅 *Step 2/5:* Enter the *Date & Time* (e.g. Nov 15, 2026 • 5:00 PM):`, parse_mode: 'Markdown' });
-    }
-    if (session.step === 'date') {
-      session.data.date = text;
-      session.step = 'venue';
-      return tg('sendMessage', { chat_id: chatId, text: `📍 *Step 3/5:* Enter the *Venue / Link* (e.g. Lab 2 or Discord):`, parse_mode: 'Markdown' });
-    }
-    if (session.step === 'venue') {
-      session.data.venue = text;
-      session.step = 'capacity';
-      return tg('sendMessage', { chat_id: chatId, text: `👥 *Step 4/5:* Enter the *Seat Capacity* (e.g. 50):`, parse_mode: 'Markdown' });
-    }
-    if (session.step === 'capacity') {
-      session.data.capacity = parseInt(text) || 50;
-      session.step = 'desc';
-      return tg('sendMessage', { chat_id: chatId, text: `📋 *Step 5/5:* Enter a short *Description*:`, parse_mode: 'Markdown' });
-    }
-    if (session.step === 'desc') {
-      session.data.description = text;
-      const newEvt = {
-        id: `evt-${Date.now()}`,
-        title: session.data.title,
-        date: session.data.date,
-        venue: session.data.venue,
-        capacity: session.data.capacity,
-        description: session.data.description,
-        category: 'Workshop',
-        registeredCount: 0,
-        status: 'upcoming',
-      };
-      db.events.push(newEvt);
-      saveData();
-      userSessions.delete(userId);
       return tg('sendMessage', {
         chat_id: chatId,
-        text: `✅ *Event Created Successfully!*\n\n*${newEvt.title}*\n📅 ${newEvt.date}\n📍 ${newEvt.venue}\n👥 Seats: ${newEvt.capacity}`,
-        parse_mode: 'Markdown',
+        text: `❌ Incorrect passcode. Try again or type \`/cancel\`.`,
       });
     }
   }
-}
 
-async function sendEventsList(chatId) {
-  if (!db.events.length) {
-    return tg('sendMessage', { chat_id: chatId, text: `No upcoming events at the moment.` });
+  if (session.step === 'title') {
+    session.data.title = text;
+    session.step = 'date';
+    return tg('sendMessage', {
+      chat_id: chatId,
+      text: `🗓 *Step 2/4*: Please enter *Date & Time* (e.g. \`Nov 10, 2026 • 05:00 PM IST\`):`,
+      parse_mode: 'Markdown',
+    });
   }
 
-  for (const evt of db.events) {
-    const remaining = Math.max(0, evt.capacity - evt.registeredCount);
-    const msg = `🏆 *${evt.title}*\n\n` +
-      `📅 *Date:* ${evt.date}\n` +
-      `📍 *Venue:* ${evt.venue}\n` +
-      `🏷 *Type:* ${evt.category}\n` +
-      `👥 *Seats Remaining:* ${remaining}/${evt.capacity}\n\n` +
-      `📝 *About:* ${evt.description}`;
-
-    await tg('sendMessage', {
+  if (session.step === 'date') {
+    session.data.date = text;
+    session.step = 'venue';
+    return tg('sendMessage', {
       chat_id: chatId,
-      text: msg,
+      text: `📍 *Step 3/4*: Enter *Venue or Online Link* (e.g. \`Lab 3 & Discord\`):`,
+      parse_mode: 'Markdown',
+    });
+  }
+
+  if (session.step === 'venue') {
+    session.data.venue = text;
+    session.step = 'description';
+    return tg('sendMessage', {
+      chat_id: chatId,
+      text: `📝 *Step 4/4*: Enter a brief *Description and Capacity* (e.g. \`Hands-on coding! Capacity: 75\`):`,
+      parse_mode: 'Markdown',
+    });
+  }
+
+  if (session.step === 'description') {
+    const match = text.match(/(\d+)/);
+    const capacity = match ? parseInt(match[1], 10) : 60;
+    const newEvent = {
+      id: 'evt-' + Date.now(),
+      title: session.data.title,
+      date: session.data.date,
+      venue: session.data.venue,
+      description: text,
+      category: 'Workshop',
+      capacity,
+      registeredCount: 0,
+      status: 'upcoming',
+    };
+    db.events.unshift(newEvent);
+    saveData();
+    userSessions.delete(userId);
+
+    return tg('sendMessage', {
+      chat_id: chatId,
+      text: `🎉 *Event Created Successfully!*\n\n📌 *${newEvent.title}*\n🗓 ${newEvent.date}\n📍 ${newEvent.venue}\n👥 Capacity: ${newEvent.capacity}\n\nLive for registrations via \`/events\`!`,
       parse_mode: 'Markdown',
       reply_markup: {
-        inline_keyboard: [
-          [{ text: remaining > 0 ? '🎟 Register Now' : '❌ Sold Out', callback_data: `reg_${evt.id}` }],
-        ],
+        inline_keyboard: [[{ text: '📅 View in /events', callback_data: 'cmd_events' }]],
       },
     });
   }
 }
 
-async function handleCallback(cq) {
-  const chatId = cq.message.chat.id;
-  const userId = cq.from.id;
-  const username = cq.from.username || '';
-  const fullName = `${cq.from.first_name || ''} ${cq.from.last_name || ''}`.trim() || 'Debugger';
-  const data = cq.data;
-
-  await tg('answerCallbackQuery', { callback_query_id: cq.id });
-
-  if (data === 'cmd_events') return sendEventsList(chatId);
-  if (data === 'cmd_help') return tg('sendMessage', { chat_id: chatId, text: `Use /events to register or /makeadmin for organizer permissions.` });
-
-  if (data.startsWith('reg_')) {
-    const evtId = data.replace('reg_', '');
-    const evt = db.events.find((e) => e.id === evtId);
-    if (!evt) return;
-
-    const alreadyReg = db.registrations.some((r) => r.eventId === evtId && String(r.telegramUserId) === String(userId));
-    if (alreadyReg) {
-      return tg('sendMessage', { chat_id: chatId, text: `⚠️ You are already registered for *${evt.title}*!`, parse_mode: 'Markdown' });
-    }
-
-    if (evt.registeredCount >= evt.capacity) {
-      return tg('sendMessage', { chat_id: chatId, text: `❌ Sorry, *${evt.title}* is full.`, parse_mode: 'Markdown' });
-    }
-
-    evt.registeredCount++;
-    db.registrations.push({
-      id: `reg-${Date.now()}`,
-      eventId: evtId,
-      telegramUserId: String(userId),
-      telegramUsername: username,
-      fullName: fullName,
-      registeredAt: new Date().toISOString(),
-    });
-    saveData();
-
+async function sendEventsList(chatId, userId) {
+  if (db.events.length === 0) {
     return tg('sendMessage', {
       chat_id: chatId,
-      text: `🎉 *Confirmed!* You are successfully registered for *${evt.title}*!\n\n📅 ${evt.date}\n📍 ${evt.venue}`,
+      text: `📅 *Upcoming Events*\n\nNo upcoming events right now. Check back soon!`,
       parse_mode: 'Markdown',
     });
   }
 
+  let text = `📅 *Debuggers' Club Upcoming Events (${db.events.length})*\n\n`;
+  const keyboard = [];
+
+  db.events.forEach((evt, idx) => {
+    const isReg = db.registrations.some((r) => r.eventId === evt.id && r.telegramUserId === String(userId));
+    const spotsLeft = Math.max(0, evt.capacity - evt.registeredCount);
+
+    text += `*${idx + 1}. ${evt.title}*\n`;
+    text += `🏷 *Type*: ${evt.category}\n`;
+    text += `🗓 *Date*: ${evt.date}\n`;
+    text += `📍 *Venue*: ${evt.venue}\n`;
+    text += `👥 *Seats*: ${evt.registeredCount}/${evt.capacity} (${spotsLeft > 0 ? `${spotsLeft} left` : 'FULL'})\n`;
+    text += `📝 ${evt.description}\n`;
+    text += `${isReg ? '✅ *You are registered!*' : '👉 Tap button below to register.'}\n\n`;
+
+    if (isReg) {
+      keyboard.push([{ text: `✅ Registered: ${evt.title.substring(0, 22)}...`, callback_data: 'noop' }]);
+    } else if (spotsLeft > 0) {
+      keyboard.push([{ text: `🎟 Register for ${evt.title.substring(0, 20)}...`, callback_data: `reg_${evt.id}` }]);
+    }
+  });
+
+  return tg('sendMessage', {
+    chat_id: chatId,
+    text,
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: keyboard },
+  });
+}
+
+async function registerUser(chatId, userId, fullName, username, eventId) {
+  const evt = db.events.find((e) => e.id === eventId);
+  if (!evt) {
+    return tg('sendMessage', { chat_id: chatId, text: '❌ Event not found.' });
+  }
+
+  const existing = db.registrations.find((r) => r.eventId === eventId && r.telegramUserId === String(userId));
+  if (existing) {
+    return tg('sendMessage', {
+      chat_id: chatId,
+      text: `✅ You are already registered for *${evt.title}*! (Ticket: \`${existing.id}\`)`,
+      parse_mode: 'Markdown',
+    });
+  }
+
+  const newReg = {
+    id: 'reg-' + Date.now().toString(36),
+    eventId: evt.id,
+    eventTitle: evt.title,
+    telegramUserId: String(userId),
+    telegramUsername: username,
+    fullName,
+    registeredAt: new Date().toISOString(),
+  };
+
+  db.registrations.push(newReg);
+  evt.registeredCount++;
+  saveData();
+
+  return tg('sendMessage', {
+    chat_id: chatId,
+    text:
+      `🎉 *Registration Confirmed!*\n\n` +
+      `📌 *${evt.title}*\n` +
+      `🗓 ${evt.date}\n` +
+      `📍 ${evt.venue}\n` +
+      `🆔 Ticket ID: \`${newReg.id}\`\n\n` +
+      `See you there! Happy Debugging! 🐛⚡`,
+    parse_mode: 'Markdown',
+  });
+}
+
+async function handleCallback(cb) {
+  const chatId = cb.message?.chat.id;
+  const userId = String(cb.from.id);
+  const fullName = [cb.from.first_name, cb.from.last_name].filter(Boolean).join(' ') || 'Developer';
+  const username = cb.from.username || '';
+  const data = cb.data;
+
+  await tg('answerCallbackQuery', { callback_query_id: cb.id });
+
+  if (data === 'cmd_events') return sendEventsList(chatId, userId);
+  if (data === 'cmd_help') {
+    return tg('sendMessage', {
+      chat_id: chatId,
+      text: `🛠 *Debuggers' Club Bot*\n\nType \`/events\` to browse events or \`/help\` for commands.`,
+      parse_mode: 'Markdown',
+    });
+  }
+  if (data === 'cmd_makeadmin') {
+    userSessions.set(userId, { step: 'passcode' });
+    return tg('sendMessage', {
+      chat_id: chatId,
+      text: `🔐 Please enter the admin passcode:`,
+    });
+  }
+  if (data.startsWith('reg_')) {
+    const evtId = data.replace('reg_', '');
+    return registerUser(chatId, userId, fullName, username, evtId);
+  }
   if (data.startsWith('part_')) {
     const evtId = data.replace('part_', '');
     const evt = db.events.find((e) => e.id === evtId);
@@ -378,7 +496,6 @@ async function handleCallback(cq) {
     });
     return tg('sendMessage', { chat_id: chatId, text: txt || 'No registrations yet.', parse_mode: 'Markdown' });
   }
-
   if (data.startsWith('del_')) {
     const evtId = data.replace('del_', '');
     const idx = db.events.findIndex((e) => e.id === evtId);
@@ -390,20 +507,26 @@ async function handleCallback(cq) {
   }
 }
 
-// Bot Startup Loop
 async function startBot() {
   console.log('🤖 Connecting to Telegram Bot API...');
+
   const me = await tg('getMe');
   if (!me.ok) {
     console.error('❌ Failed to connect:', me.description);
     process.exit(1);
   }
 
-  console.log(`✨ Bot is online: @${me.result.username}`);
+  console.log(`\n======================================================`);
+  console.log(`✨ DEBUGGERS' CLUB BOT IS ONLINE!`);
+  console.log(`   Username: @${me.result.username}`);
+  console.log(`======================================================\n`);
+
   await setupCommands();
   await tg('deleteWebhook', { drop_pending_updates: false });
 
   let offset = 0;
+  console.log('📡 Long polling active... Listening for Telegram messages...\n');
+
   while (true) {
     try {
       const updates = await tg('getUpdates', { offset, timeout: 25 });
@@ -415,6 +538,7 @@ async function startBot() {
         }
       }
     } catch (err) {
+      console.error('Polling error, reconnecting in 3s...', err.message);
       await new Promise((r) => setTimeout(r, 3000));
     }
   }
